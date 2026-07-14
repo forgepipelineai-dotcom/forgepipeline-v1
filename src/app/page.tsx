@@ -1,5 +1,6 @@
 // ForgePipeline AI - Landing Page
 import Link from 'next/link';
+import { CTAButton } from '@/components/CTAButton';
 
 export default function HomePage() {
   return (
@@ -43,18 +44,22 @@ export default function HomePage() {
         </p>
 
         <div className="flex items-center justify-center gap-4">
-          <Link
+          <CTAButton
             href="/onboarding"
+            variant="primary"
+            location="hero"
             className="bg-green-500 hover:bg-green-400 text-black font-black text-lg px-8 py-4 rounded-xl transition"
           >
             Start 14-Day Free Trial
-          </Link>
-          <Link
+          </CTAButton>
+          <CTAButton
             href="#demo"
+            variant="demo"
+            location="hero"
             className="border border-zinc-700 hover:border-zinc-500 text-white font-medium text-lg px-8 py-4 rounded-xl transition"
           >
             Watch Demo →
-          </Link>
+          </CTAButton>
         </div>
 
         <p className="text-sm text-zinc-600 mt-4">No credit card required · Setup in 10 minutes</p>
@@ -185,8 +190,30 @@ export default function HomePage() {
         </div>
       </section>
 
+      {/* Demo Section — anchor target for #demo CTA */}
+      <section id="demo" aria-labelledby="demo-heading" className="max-w-5xl mx-auto px-8 py-20 text-center">
+        <h2 id="demo-heading" className="text-3xl font-black text-white mb-4">See ForgePipeline in Action</h2>
+        <p className="text-zinc-400 mb-8 max-w-xl mx-auto">Watch how ForgePipeline AI captures a missed call, sends an AI-powered text in under 60 seconds, and books the job — automatically.</p>
+        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-12 flex items-center justify-center">
+          <div className="text-center">
+            <div className="w-20 h-20 rounded-full bg-green-500/10 border border-green-500/30 flex items-center justify-center mx-auto mb-4">
+              <svg aria-hidden="true" className="w-8 h-8 text-green-400" fill="currentColor" viewBox="0 0 24 24">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </div>
+            <p className="text-zinc-500 text-sm">Demo video coming in Phase 5</p>
+            <Link
+              href="/onboarding"
+              className="inline-block mt-4 bg-green-500 hover:bg-green-400 text-black font-bold px-6 py-3 rounded-lg transition text-sm"
+            >
+              Skip the demo — start your trial
+            </Link>
+          </div>
+        </div>
+      </section>
+
       {/* Footer */}
-      <footer className="border-t border-zinc-900 py-8 text-center">
+      <footer role="contentinfo" aria-label="Site footer" className="border-t border-zinc-900 py-8 text-center">
         <p className="text-zinc-600 text-sm">
           © 2025 ForgePipeline AI · Built by{' '}
           <a href="https://forgepipelineai.com" className="text-green-400 hover:underline">
