@@ -1,0 +1,8 @@
+User-agent: *
+Allow: /
+
+# Disallow private routes
+Disallow: /dashboard
+Disallow: /api/
+
+Sitemap: https://forgepipeline-v1.vercel.app/sitemap.xml

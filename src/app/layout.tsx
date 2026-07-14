@@ -6,6 +6,11 @@ import './globals.css';
 const inter = Inter({ subsets: ['latin'] });
 
 export const metadata: Metadata = {
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: { index: true, follow: true },
+  },
   metadataBase: new URL('https://forgepipelineai.com'),
   title: 'ForgePipeline AI — Never Miss a Lead',
   description:

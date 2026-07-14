@@ -82,7 +82,15 @@ export default function OnboardingPage() {
           <Link href="/auth/login" className="text-green-400 hover:underline">Sign in</Link>
         </p>
 
-        <p className="text-center text-xs text-zinc-700 mt-6">
+        <p className="text-center text-xs text-zinc-700 mt-6 leading-relaxed px-2">
+          By creating an account you agree to our{' '}
+          <a href="https://forgepipelineai.com/terms-of-service" className="underline hover:text-zinc-500">Terms of Service</a>{' '}and{' '}
+          <a href="https://forgepipelineai.com/privacy-policy" className="underline hover:text-zinc-500">Privacy Policy</a>.
+          ForgePipeline AI may send automated text messages to the business phone number you provide.
+          Message &amp; data rates may apply. Reply STOP to opt out.{' '}
+          <a href="https://forgepipelineai.com/consent-policy" className="underline hover:text-zinc-500">SMS Consent Policy</a>.
+        </p>
+        <p className="text-center text-xs text-zinc-700 mt-3">
           <Link href="/" className="hover:text-zinc-500 transition">← Back to home</Link>
         </p>
       </div>
