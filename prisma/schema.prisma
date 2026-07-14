@@ -441,3 +441,19 @@ enum IntegrationProvider {
   GOOGLE_CALENDAR
   STRIPE
 }
+
+// Durable idempotency store for inbound webhooks.
+// Unique constraint on idempotencyKey prevents duplicate processing
+// across serverless instances, cold starts, and GHL retries.
+model WebhookEvent {
+  id              String   @id @default(cuid())
+  idempotencyKey  String   @unique           // locationId:type:eventId
+  source          String                     // "ghl" | "twilio" | "stripe"
+  eventType       String                     // ContactCreate | FormSubmit | etc.
+  processedAt     DateTime @default(now())
+  expiresAt       DateTime                   // prune records older than 7d via cron
+
+  @@index([source, eventType])
+  @@index([expiresAt])
+  @@map("webhook_events")
+}

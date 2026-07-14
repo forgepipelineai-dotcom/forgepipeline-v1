@@ -94,31 +94,73 @@ function verifySignature(rawBody: string, signature: string | null): boolean {
 }
 
 // ─── Idempotency Store ────────────────────────────────────────────────────────
+//
+// Two-layer design:
+//   L1 — in-memory Map: sub-millisecond check within a warm serverless instance.
+//          Does NOT survive cold starts or cross-instance delivery.
+//   L2 — DB WebhookEvent table: durable unique constraint that prevents
+//          duplicate processing across all instances, restarts, and GHL retries.
+//
+// Flow: check L1 → check L2 → process → write L2 → write L1
+// On duplicate: return 200 immediately so GHL stops retrying.
 
-// In-memory idempotency cache (survives restarts via DB in production).
-// Key: locationId:type:id — TTL: 24h window
-const processedEvents = new Map<string, number>();
+// L1 — instance-local warm cache (evicted on cold start; that's fine — L2 catches it)
+const l1Cache = new Map<string, number>();
 
 function buildIdempotencyKey(payload: GHLWebhookPayload): string {
   const id = payload.id ?? payload.contactId ?? payload.appointmentId ?? payload.formId ?? 'unknown';
   return `${payload.locationId}:${payload.type}:${id}`;
 }
 
-function isDuplicate(key: string): boolean {
-  const ts = processedEvents.get(key);
+function l1IsDuplicate(key: string): boolean {
+  const ts = l1Cache.get(key);
   if (!ts) return false;
-  const age = Date.now() - ts;
-  return age < 86_400_000; // 24h
+  return Date.now() - ts < 86_400_000; // 24h
 }
 
-function markProcessed(key: string): void {
-  processedEvents.set(key, Date.now());
-  // Prune keys older than 24h to prevent memory leak
-  if (processedEvents.size > 10_000) {
+function l1Mark(key: string): void {
+  l1Cache.set(key, Date.now());
+  // Prune to prevent unbounded growth within a single warm instance
+  if (l1Cache.size > 5_000) {
     const cutoff = Date.now() - 86_400_000;
-    for (const [k, t] of processedEvents) {
-      if (t < cutoff) processedEvents.delete(k);
+    for (const [k, t] of l1Cache) {
+      if (t < cutoff) l1Cache.delete(k);
     }
+  }
+}
+
+/**
+ * Attempt to write the idempotency key to the DB.
+ * Returns true if this is the FIRST delivery (key did not exist).
+ * Returns false if the key already exists (duplicate — skip processing).
+ * Swallows DB errors in dev so tests can run without a real DATABASE_URL.
+ */
+async function l2ClaimKey(key: string, eventType: string): Promise<boolean> {
+  try {
+    const { prisma } = await import('@/lib/db/client');
+    await prisma.webhookEvent.create({
+      data: {
+        idempotencyKey: key,
+        source: 'ghl',
+        eventType,
+        // Keep records for 7 days then prune (cron or DB job)
+        expiresAt: new Date(Date.now() + 7 * 86_400_000),
+      },
+    });
+    return true; // Created successfully — first delivery
+  } catch (err: unknown) {
+    // Unique constraint violation → duplicate delivery
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('Unique constraint') || msg.includes('P2002')) {
+      return false;
+    }
+    // DB unavailable (e.g. dev with mock DATABASE_URL) — fall back to L1 only
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[GHL Webhook] DB unavailable for idempotency check — L1 only (dev mode)');
+      return true; // Allow processing; L1 will catch retries within same instance
+    }
+    // In production, treat DB error as transient — return 500 so GHL retries later
+    throw err;
   }
 }
 
@@ -289,11 +331,28 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing locationId' }, { status: 400 });
   }
 
-  // 5. Idempotency — return 200 immediately for duplicates (safe for GHL retries)
+  // 5. Idempotency — L1 (in-memory) then L2 (DB) check
   const idempotencyKey = buildIdempotencyKey(payload);
-  if (isDuplicate(idempotencyKey)) {
-    console.log(`[GHL Webhook] Duplicate event ignored — key: ${idempotencyKey}`);
-    return NextResponse.json({ status: 'already_processed' }, { status: 200 });
+
+  // L1: instant check within same warm instance
+  if (l1IsDuplicate(idempotencyKey)) {
+    console.log(`[GHL Webhook] Duplicate (L1) — key: ${idempotencyKey}`);
+    return NextResponse.json({ status: 'already_processed', layer: 'l1' }, { status: 200 });
+  }
+
+  // L2: durable DB check (catches cross-instance and post-cold-start duplicates)
+  let isFirstDelivery: boolean;
+  try {
+    isFirstDelivery = await l2ClaimKey(idempotencyKey, payload.type);
+  } catch {
+    // DB error in production — reject with 500 so GHL retries later
+    return NextResponse.json({ error: 'Idempotency check failed' }, { status: 500 });
+  }
+
+  if (!isFirstDelivery) {
+    l1Mark(idempotencyKey); // warm the L1 cache so subsequent retries skip DB
+    console.log(`[GHL Webhook] Duplicate (L2) — key: ${idempotencyKey}`);
+    return NextResponse.json({ status: 'already_processed', layer: 'l2' }, { status: 200 });
   }
 
   // 6. Dispatch to event handler
@@ -328,8 +387,8 @@ export async function POST(req: NextRequest) {
         console.log(`[GHL Webhook] Unhandled event type: ${payload.type}`);
     }
 
-    // 7. Mark as processed after successful handling
-    markProcessed(idempotencyKey);
+    // 7. Warm L1 cache after confirmed processing
+    l1Mark(idempotencyKey);
 
     return NextResponse.json(
       { status: 'ok', event: payload.type, processed: idempotencyKey },
