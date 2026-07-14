@@ -1,0 +1,443 @@
+// ForgePipeline AI - Database Schema
+// Prisma + PostgreSQL (Supabase)
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─────────────────────────────────────────────
+// ORGANIZATIONS (Client businesses / contractors)
+// ─────────────────────────────────────────────
+model Organization {
+  id          String   @id @default(cuid())
+  name        String
+  slug        String   @unique
+  industry    String   // roofer | hvac | plumber | landscaper | custom
+  phone       String?
+  email       String?
+  website     String?
+  address     String?
+  city        String?
+  state       String?
+  zip         String?
+  timezone    String   @default("America/New_York")
+  
+  // Subscription
+  stripeCustomerId     String?  @unique
+  stripeSubscriptionId String?  @unique
+  plan                 Plan     @default(STARTER)
+  planStatus           PlanStatus @default(TRIAL)
+  trialEndsAt          DateTime?
+  
+  // Settings
+  aiPersona       String?  // Custom AI persona name
+  responseDelay   Int      @default(30)  // seconds before AI responds
+  businessHours   Json?    // { mon: { open: "08:00", close: "17:00" }, ... }
+  afterHoursMsg   String?
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Relations
+  users       User[]
+  leads       Lead[]
+  campaigns   Campaign[]
+  workflows   Workflow[]
+  calls       CallLog[]
+  messages    Message[]
+  analytics   AnalyticsEvent[]
+  webhooks    WebhookEndpoint[]
+  apiKeys     ApiKey[]
+  integrations Integration[]
+
+  @@map("organizations")
+}
+
+// ─────────────────────────────────────────────
+// USERS
+// ─────────────────────────────────────────────
+model User {
+  id             String  @id @default(cuid())
+  supabaseId     String  @unique
+  email          String  @unique
+  name           String?
+  phone          String?
+  role           Role    @default(MEMBER)
+  organizationId String
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("users")
+}
+
+// ─────────────────────────────────────────────
+// LEADS
+// ─────────────────────────────────────────────
+model Lead {
+  id             String     @id @default(cuid())
+  organizationId String
+  
+  // Contact info
+  name           String?
+  phone          String
+  email          String?
+  address        String?
+  city           String?
+  state          String?
+  
+  // Lead details
+  source         LeadSource @default(MISSED_CALL)
+  status         LeadStatus @default(NEW)
+  stage          String     @default("new")  // new | contacted | qualified | demo | closed | lost
+  priority       Priority   @default(MEDIUM)
+  
+  // Job details
+  jobType        String?    // roof repair | hvac install | plumbing | etc
+  jobDescription String?
+  estimatedValue Float?
+  
+  // AI tracking
+  aiResponded    Boolean    @default(false)
+  aiResponseAt   DateTime?
+  aiScore        Int?       // 0-100 lead quality score
+  
+  // Assignment
+  assignedTo     String?
+  
+  // GHL sync
+  ghlContactId   String?
+  ghlOpportunityId String?
+  
+  notes          String?
+  tags           String[]
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  messages     Message[]
+  calls        CallLog[]
+  activities   LeadActivity[]
+
+  @@index([organizationId, status])
+  @@index([organizationId, createdAt])
+  @@map("leads")
+}
+
+// ─────────────────────────────────────────────
+// CALL LOGS (Missed calls + answered calls)
+// ─────────────────────────────────────────────
+model CallLog {
+  id             String     @id @default(cuid())
+  organizationId String
+  leadId         String?
+  
+  twilioCallSid  String     @unique
+  from           String     // caller phone
+  to             String     // business phone
+  direction      String     @default("inbound")
+  status         String     // missed | answered | voicemail
+  duration       Int        @default(0)  // seconds
+  
+  // AI response triggered
+  textBackSent   Boolean    @default(false)
+  textBackAt     DateTime?
+  textBackMsg    String?
+  
+  recordingUrl   String?
+  voicemailUrl   String?
+  transcription  String?
+  
+  occurredAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lead         Lead?        @relation(fields: [leadId], references: [id])
+
+  @@index([organizationId, occurredAt])
+  @@map("call_logs")
+}
+
+// ─────────────────────────────────────────────
+// MESSAGES (SMS conversations)
+// ─────────────────────────────────────────────
+model Message {
+  id             String      @id @default(cuid())
+  organizationId String
+  leadId         String?
+  
+  twilioSid      String?     @unique
+  from           String
+  to             String
+  body           String
+  direction      MessageDirection
+  channel        String      @default("sms")  // sms | email | dm
+  
+  // AI flag
+  aiGenerated    Boolean     @default(false)
+  aiModel        String?
+  
+  status         String      @default("sent")  // sent | delivered | read | failed
+  
+  sentAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  lead         Lead?        @relation(fields: [leadId], references: [id])
+
+  @@index([organizationId, leadId])
+  @@map("messages")
+}
+
+// ─────────────────────────────────────────────
+// WORKFLOWS (Automation sequences)
+// ─────────────────────────────────────────────
+model Workflow {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  description    String?
+  trigger        WorkflowTrigger
+  isActive       Boolean  @default(true)
+  
+  // Workflow steps stored as JSON
+  steps          Json     // Array of WorkflowStep objects
+  
+  // Stats
+  totalRuns      Int      @default(0)
+  successRuns    Int      @default(0)
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("workflows")
+}
+
+// ─────────────────────────────────────────────
+// CAMPAIGNS (Outreach sequences)
+// ─────────────────────────────────────────────
+model Campaign {
+  id             String         @id @default(cuid())
+  organizationId String
+  name           String
+  type           CampaignType   @default(SMS)
+  status         CampaignStatus @default(DRAFT)
+  
+  // Target
+  targetIndustry String?
+  targetCity     String?
+  targetState    String?
+  
+  // Content
+  messages       Json    // Array of { delay: number, message: string }
+  
+  // Stats
+  totalSent      Int     @default(0)
+  totalOpened    Int     @default(0)
+  totalReplied   Int     @default(0)
+  totalConverted Int     @default(0)
+  
+  scheduledAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("campaigns")
+}
+
+// ─────────────────────────────────────────────
+// LEAD ACTIVITIES (Audit trail)
+// ─────────────────────────────────────────────
+model LeadActivity {
+  id          String   @id @default(cuid())
+  leadId      String
+  type        String   // call | sms | email | status_change | note | ai_response
+  description String
+  metadata    Json?
+  
+  createdAt DateTime @default(now())
+  
+  lead Lead @relation(fields: [leadId], references: [id], onDelete: Cascade)
+
+  @@index([leadId])
+  @@map("lead_activities")
+}
+
+// ─────────────────────────────────────────────
+// ANALYTICS EVENTS
+// ─────────────────────────────────────────────
+model AnalyticsEvent {
+  id             String   @id @default(cuid())
+  organizationId String
+  event          String   // lead.created | call.missed | sms.sent | deal.closed
+  properties     Json?
+  
+  occurredAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, event, occurredAt])
+  @@map("analytics_events")
+}
+
+// ─────────────────────────────────────────────
+// INTEGRATIONS (GHL, Zapier, etc.)
+// ─────────────────────────────────────────────
+model Integration {
+  id             String          @id @default(cuid())
+  organizationId String
+  provider       IntegrationProvider
+  isActive       Boolean         @default(true)
+  
+  // Auth
+  accessToken    String?
+  refreshToken   String?
+  tokenExpiresAt DateTime?
+  
+  // Config
+  config         Json?           // provider-specific config
+  
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, provider])
+  @@map("integrations")
+}
+
+// ─────────────────────────────────────────────
+// WEBHOOK ENDPOINTS (for outbound webhooks)
+// ─────────────────────────────────────────────
+model WebhookEndpoint {
+  id             String   @id @default(cuid())
+  organizationId String
+  url            String
+  events         String[] // events to fire on
+  secret         String
+  isActive       Boolean  @default(true)
+  
+  createdAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("webhook_endpoints")
+}
+
+// ─────────────────────────────────────────────
+// API KEYS
+// ─────────────────────────────────────────────
+model ApiKey {
+  id             String   @id @default(cuid())
+  organizationId String
+  name           String
+  key            String   @unique
+  lastUsedAt     DateTime?
+  expiresAt      DateTime?
+  isActive       Boolean  @default(true)
+  
+  createdAt DateTime @default(now())
+  
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@map("api_keys")
+}
+
+// ─────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────
+enum Plan {
+  STARTER   // $297/mo - 1 location, 500 contacts
+  PRO       // $597/mo - 3 locations, 2000 contacts  
+  AGENCY    // $997/mo - unlimited locations
+}
+
+enum PlanStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  CANCELED
+  PAUSED
+}
+
+enum Role {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum LeadSource {
+  MISSED_CALL
+  INBOUND_SMS
+  WEB_FORM
+  MANUAL
+  IMPORT
+  CAMPAIGN
+  REFERRAL
+}
+
+enum LeadStatus {
+  NEW
+  CONTACTED
+  QUALIFIED
+  PROPOSAL
+  CLOSED_WON
+  CLOSED_LOST
+  UNQUALIFIED
+}
+
+enum Priority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum WorkflowTrigger {
+  MISSED_CALL
+  NEW_LEAD
+  NO_RESPONSE_24H
+  LEAD_STATUS_CHANGE
+  BOOKING_MADE
+  REVIEW_REQUEST
+  MANUAL
+}
+
+enum CampaignType {
+  SMS
+  EMAIL
+  RINGLESS_VOICEMAIL
+}
+
+enum CampaignStatus {
+  DRAFT
+  SCHEDULED
+  RUNNING
+  PAUSED
+  COMPLETED
+}
+
+enum IntegrationProvider {
+  GOHIGHLEVEL
+  ZAPIER
+  CALENDLY
+  JOBBER
+  HOUSECALL_PRO
+  GOOGLE_CALENDAR
+  STRIPE
+}
