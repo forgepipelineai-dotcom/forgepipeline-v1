@@ -19,6 +19,7 @@ export const metadata: Metadata = {
 
 export default function HomePage() {
   return (
+    <>
     <main className="min-h-screen bg-black text-white">
       {/* Nav */}
       <nav className="flex items-center justify-between px-8 py-5 border-b border-zinc-900">
@@ -228,14 +229,16 @@ export default function HomePage() {
       </section>
 
       {/* Footer */}
-      <footer role="contentinfo" aria-label="Site footer" className="border-t border-zinc-900 py-8 text-center">
-        <p className="text-zinc-600 text-sm">
-          © 2025 ForgePipeline AI · Built by{' '}
-          <a href="https://forgepipelineai.com" className="text-green-400 hover:underline">
-            ForgePipeline
-          </a>
-        </p>
-      </footer>
     </main>
+
+    <footer role="contentinfo" aria-label="Site footer" className="border-t border-zinc-900 py-8 text-center">
+      <p className="text-zinc-600 text-sm">
+        © 2025 ForgePipeline AI · Built by{' '}
+        <a href="https://forgepipelineai.com" className="text-green-400 hover:underline">
+          ForgePipeline
+        </a>
+      </p>
+    </footer>
+    </>
   );
 }
