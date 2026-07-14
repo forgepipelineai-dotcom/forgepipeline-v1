@@ -1,3 +1,5 @@
+Removed: @radix-ui/react-badge
+Removed: @radix-ui/react-button
 {
   "name": "forgepipelineai",
   "version": "0.1.0",
@@ -19,8 +21,6 @@
     "@prisma/client": "^5.10.0",
     "@radix-ui/react-alert-dialog": "^1.0.5",
     "@radix-ui/react-avatar": "^1.0.4",
-    "@radix-ui/react-badge": "^1.0.0",
-    "@radix-ui/react-button": "^1.0.0",
     "@radix-ui/react-dialog": "^1.0.5",
     "@radix-ui/react-dropdown-menu": "^2.0.6",
     "@radix-ui/react-label": "^2.0.2",
