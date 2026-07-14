@@ -38,14 +38,14 @@ export async function POST(req: NextRequest) {
   // MISSED CALL HANDLER
   // ─────────────────────────────────────────────
   if (callStatus) {
-    return handleMissedCall(params as TwilioMissedCall);
+    return handleMissedCall(params as unknown as TwilioMissedCall);
   }
 
   // ─────────────────────────────────────────────
   // INBOUND SMS HANDLER
   // ─────────────────────────────────────────────
   if (params.Body) {
-    return handleInboundSMS(params as TwilioInboundMessage);
+    return handleInboundSMS(params as unknown as TwilioInboundMessage);
   }
 
   return NextResponse.json({ ok: true });
