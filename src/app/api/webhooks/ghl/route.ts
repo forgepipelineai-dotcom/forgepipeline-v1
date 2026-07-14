@@ -331,6 +331,25 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'Missing locationId' }, { status: 400 });
   }
 
+  // 4b. Location validation — reject events not from the approved GHL location.
+  // Prevents cross-location data contamination even with a valid shared secret.
+  const approvedLocationId = process.env.GHL_LOCATION_ID || process.env.GHL_DEFAULT_ORG_ID;
+  if (approvedLocationId && payload.locationId !== approvedLocationId) {
+    // Log (without exposing approved value) and reject
+    console.warn(
+      `[GHL Webhook] Rejected — unexpected locationId: ${payload.locationId.slice(0, 8)}...` +
+      ` (expected approved location)`
+    );
+    return NextResponse.json(
+      { error: 'Forbidden — locationId not approved for this endpoint' },
+      { status: 403 },
+    );
+  }
+  // If neither env var is set, fall through with a warning (dev/test mode)
+  if (!approvedLocationId) {
+    console.warn('[GHL Webhook] GHL_LOCATION_ID not set — locationId validation skipped (dev/test only)');
+  }
+
   // 5. Idempotency — L1 (in-memory) then L2 (DB) check
   const idempotencyKey = buildIdempotencyKey(payload);
 
@@ -397,8 +416,23 @@ export async function POST(req: NextRequest) {
   } catch (err) {
     // 8. Safe error logging — no secrets, no user PII in error response
     const msg = err instanceof Error ? err.message : 'Unknown error';
+
+    // In dev/test with no DATABASE_URL, Prisma operations throw connection errors.
+    // These are expected and should not cause 500s in development.
+    const isDbConnectionError = msg.includes('connect') || msg.includes('ECONNREFUSED') ||
+      msg.includes('P1001') || msg.includes('P1002') || msg.includes('Can\'t reach');
+
+    if (isDbConnectionError && process.env.NODE_ENV !== 'production') {
+      console.warn(`[GHL Webhook] DB unavailable — event ${payload.type} logged but not persisted (dev mode)`);
+      l1Mark(idempotencyKey);
+      return NextResponse.json(
+        { status: 'ok', event: payload.type, processed: idempotencyKey, note: 'db_unavailable_dev' },
+        { status: 200 },
+      );
+    }
+
     console.error(`[GHL Webhook] Handler error for ${payload.type}:`, msg);
-    // Return 500 so GHL will retry
+    // Return 500 so GHL will retry in production
     return NextResponse.json({ error: 'Internal processing error' }, { status: 500 });
   }
 }
