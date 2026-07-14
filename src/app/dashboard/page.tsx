@@ -2,6 +2,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useRouter } from 'next/navigation';
 import type { DashboardMetrics, LeadWithActivity } from '@/types';
 
 // Metric Card Component
@@ -72,9 +73,20 @@ function LeadRow({ lead }: { lead: LeadWithActivity }) {
 }
 
 export default function DashboardPage() {
+  const router = useRouter();
   const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
   const [leads, setLeads] = useState<LeadWithActivity[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // Auth guard — redirect to login if no session token present
+  useEffect(() => {
+    const token = typeof window !== 'undefined'
+      ? (localStorage.getItem('fp_session') || sessionStorage.getItem('fp_session'))
+      : null;
+    if (!token) {
+      router.replace('/auth/login');
+    }
+  }, [router]);
 
   useEffect(() => {
     async function loadDashboard() {

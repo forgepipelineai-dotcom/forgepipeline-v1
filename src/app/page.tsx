@@ -189,7 +189,7 @@ export default function HomePage() {
       <footer className="border-t border-zinc-900 py-8 text-center">
         <p className="text-zinc-600 text-sm">
           © 2025 ForgePipeline AI · Built by{' '}
-          <a href="https://forgepipeline.com" className="text-green-400 hover:underline">
+          <a href="https://forgepipelineai.com" className="text-green-400 hover:underline">
             ForgePipeline
           </a>
         </p>
