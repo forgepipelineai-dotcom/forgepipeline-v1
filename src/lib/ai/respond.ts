@@ -4,9 +4,14 @@
 import OpenAI from 'openai';
 import type { AIResponseConfig, Industry } from '@/types';
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Lazy initialization to avoid build-time errors when env vars aren't set
+let _openai: OpenAI | null = null;
+function getOpenAI(): OpenAI {
+  if (!_openai) {
+    _openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  }
+  return _openai;
+}
 
 const INDUSTRY_CONTEXTS: Record<Industry, string> = {
   roofing: 'roofing contractor (roof repairs, replacements, inspections, storm damage)',
@@ -86,7 +91,7 @@ Response style: ${config.responseStyle}`;
     { role: 'user', content: userContent },
   ];
 
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     messages,
     max_tokens: 200,
@@ -97,7 +102,7 @@ Response style: ${config.responseStyle}`;
     completion.choices[0]?.message?.content?.trim() || '';
 
   // Detect intent
-  const intentCompletion = await openai.chat.completions.create({
+  const intentCompletion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
       {
@@ -131,7 +136,7 @@ export async function scoreLeadQuality(
 ): Promise<number> {
   if (!messages.length) return 50;
 
-  const completion = await openai.chat.completions.create({
+  const completion = await getOpenAI().chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
       {
