@@ -34,6 +34,24 @@
   }
 }
 
+/* Accessibility: ensure links in body text are distinguishable by more than color */
+@layer base {
+  /* Body-text anchors get underline so color-blind users can identify them */
+  p a, li a, td a {
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  /* Preserve no-underline for nav/button-style links */
+  nav a, .no-underline {
+    text-decoration: none;
+  }
+  /* Focus ring — visible on all interactive elements */
+  :focus-visible {
+    outline: 2px solid #4ade80;
+    outline-offset: 2px;
+  }
+}
+
 /* ForgePipeline custom utilities */
 .forge-gradient {
   background: linear-gradient(135deg, #00ff78 0%, #00c95b 100%);

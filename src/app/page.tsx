@@ -1,6 +1,21 @@
 // ForgePipeline AI - Landing Page
 import Link from 'next/link';
+import type { Metadata } from 'next';
 import { CTAButton } from '@/components/CTAButton';
+
+export const metadata: Metadata = {
+  metadataBase: new URL('https://forgepipelineai.com'),
+  title: 'ForgePipeline AI — Never Miss a Lead Again',
+  description:
+    'ForgePipeline AI instantly texts back every missed call, qualifies leads, and books jobs 24/7. Trusted by roofers, HVAC, plumbers, and contractors across the US.',
+  openGraph: {
+    title: 'ForgePipeline AI — Never Miss a Lead Again',
+    description: 'AI responds to every missed call in 60 seconds. No credit card required.',
+    url: 'https://forgepipelineai.com',
+    siteName: 'ForgePipeline AI',
+    type: 'website',
+  },
+};
 
 export default function HomePage() {
   return (

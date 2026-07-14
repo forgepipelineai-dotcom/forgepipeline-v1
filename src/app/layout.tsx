@@ -9,10 +9,15 @@ export const metadata: Metadata = {
   metadataBase: new URL('https://forgepipelineai.com'),
   title: 'ForgePipeline AI — Never Miss a Lead',
   description:
-    'AI-powered lead capture, missed-call recovery, and automated CRM for local service businesses. Roofers, HVAC, plumbers, and contractors.',
+    'AI-powered lead capture, missed-call recovery, and automated CRM for local service businesses. Roofers, HVAC, plumbers, and contractors — stop losing jobs to faster competitors.',
   keywords: 'AI lead generation, missed call automation, contractor CRM, roofer software, HVAC software',
+  // Removing maximum-scale=1 to meet WCAG 1.4.4 (Resize Text) — allow user zoom
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+  },
   openGraph: {
-    title: 'ForgePipeline AI',
+    title: 'ForgePipeline AI — Never Miss a Lead',
     description: 'Stop losing jobs to faster competitors. AI responds to every lead in 60 seconds.',
     url: 'https://forgepipelineai.com',
     siteName: 'ForgePipeline AI',
@@ -28,6 +33,10 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <head>
+        {/* Performance: preconnect to critical origins */}
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
+        <link rel="dns-prefetch" href="https://www.googletagmanager.com" />
         {/* Google Tag Manager */}
         {process.env.NEXT_PUBLIC_GTM_ID && (
           <Script id="gtm" strategy="afterInteractive">
