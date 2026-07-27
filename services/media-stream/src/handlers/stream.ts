@@ -1,224 +1,322 @@
 /**
  * Twilio Media Stream WebSocket handler
  *
- * Protocol (Twilio → us):
- *   { event: 'connected' }
- *   { event: 'start',  start:  { streamSid, callSid, accountSid, tracks, ... } }
- *   { event: 'media',  media:  { track, chunk, timestamp, payload } }  ← base64 mulaw 8kHz
- *   { event: 'stop',   stop:   { streamSid, accountSid, callSid } }
+ * ── Audio flow (caller → AI → caller) ─────────────────────────────────────────
  *
- * Pipeline per call:
- *   Twilio audio → Deepgram live STT → Anthropic Claude → ElevenLabs TTS
- *   → MP3 URL → Twilio REST API (redirect call to <Play> TwiML)
+ *  1. Twilio opens a WebSocket to /stream when the call starts.
+ *  2. Caller speaks → Twilio sends media events with base64-encoded mulaw audio.
+ *  3. We forward audio chunks to Deepgram nova-3 live STT over a persistent
+ *     WebSocket connection per call.
+ *  4. Deepgram returns a final transcript (speech_final = true).
+ *  5. We pass the transcript to the LLM adapter (claude-haiku-4-5-20251001 by
+ *     default; claude-sonnet-5 on escalation).
+ *  6. We send the AI text to ElevenLabs and request ulaw_8000 output — the same
+ *     encoding Twilio's media stream uses, so no conversion is needed.
+ *  7. We chunk the ulaw audio and send it back over the SAME open WebSocket
+ *     that is receiving the caller's audio, as Twilio media events.
+ *
+ * ── Why no Twilio REST redirect ────────────────────────────────────────────────
+ *
+ *  The previous implementation (commit db79e05) called:
+ *
+ *    twilioClient.calls(callSid).update({ twiml: '<Response><Play>...' })
+ *
+ *  That is a REST API call that tears down the current TwiML execution context,
+ *  starts a new one, and has the call bridge to a new audio source. It drops out
+ *  of the live bidirectional stream for every response turn, re-establishing call
+ *  control each time — adding 500ms–2s of seam latency on every reply.
+ *
+ *  The correct mechanism: keep the WebSocket open. Twilio Media Streams supports
+ *  bidirectional audio over the same connection. To send audio back to the caller
+ *  we write a "media" event to the WebSocket:
+ *
+ *    ws.send(JSON.stringify({
+ *      event:     'media',
+ *      streamSid: session.streamSid,
+ *      media:     { payload: base64(chunk_of_ulaw_8kHz_audio) }
+ *    }))
+ *
+ *  Twilio plays the chunks in real time as they arrive. No new call leg, no TwiML
+ *  round-trip, no redirect. One WebSocket, open for the full call.
+ *
+ * ── Twilio Media Streams protocol (reference) ─────────────────────────────────
+ *
+ *  Inbound events (Twilio → us):
+ *    { event: 'connected' }
+ *    { event: 'start',  start:  { streamSid, callSid, ... } }
+ *    { event: 'media',  media:  { payload: base64<mulaw 8kHz> } }
+ *    { event: 'stop',   stop:   { ... } }
+ *
+ *  Outbound (us → Twilio):
+ *    { event: 'media',  streamSid: '...', media: { payload: base64<mulaw 8kHz> } }
+ *    { event: 'mark',   streamSid: '...', mark:  { name: 'done' } }
+ *    { event: 'clear',  streamSid: '...' }   ← interrupt mid-playback
  */
 
 import type { WebSocket } from 'ws';
-import Anthropic from '@anthropic-ai/sdk';
 import { createClient, LiveTranscriptionEvents } from '@deepgram/sdk';
-import twilio from 'twilio';
+import { chat } from '../lib/llm.js';
 import { v4 as uuidv4 } from 'uuid';
+import https from 'https';
 
-// ─── Clients ─────────────────────────────────────────────────────────────────
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY! });
-const deepgram  = createClient(process.env.DEEPGRAM_API_KEY!);
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID!,
-  process.env.TWILIO_AUTH_TOKEN!
-);
+// ─── Clients ──────────────────────────────────────────────────────────────────
+const deepgram = createClient(process.env.DEEPGRAM_API_KEY!);
+
+// ─── Voice config (ElevenLabs) ────────────────────────────────────────────────
+const EL_VOICE_ID = process.env.ELEVENLABS_VOICE_ID!;
+const EL_API_KEY  = process.env.ELEVENLABS_API_KEY;
+
+// Chunk size for streaming ulaw audio back to Twilio.
+// 160 bytes = 20ms at 8kHz mono 8-bit — matches Twilio's incoming chunk cadence.
+const ULAW_CHUNK_BYTES = 160;
 
 // ─── Session state ────────────────────────────────────────────────────────────
-interface StreamSession {
-  sessionId:  string;
-  streamSid:  string | null;
-  callSid:    string | null;
-  transcript: string;
-  responded:  boolean;
+interface Session {
+  id:        string;
+  streamSid: string | null;
+  callSid:   string | null;
+  history:   Array<{ role: 'user' | 'assistant'; content: string }>;
+  speaking:  boolean;   // true while we are streaming audio back
 }
 
-// ─── Main handler ─────────────────────────────────────────────────────────────
-export function handleStreamConnection(ws: WebSocket): void {
-  const session: StreamSession = {
-    sessionId:  uuidv4(),
-    streamSid:  null,
-    callSid:    null,
-    transcript: '',
-    responded:  false,
-  };
-
-  console.log(`[stream:${session.sessionId}] Session opened`);
-
-  // ── Open a live Deepgram connection for this call ──────────────────────────
-  const dgConnection = deepgram.listen.live({
-    model:        'nova-2',
-    language:     'en-US',
-    encoding:     'mulaw',
-    sample_rate:  8000,
-    channels:     1,
-    smart_format: true,
-    interim_results: true,
-    utterance_end_ms: 1200,   // fire final after 1.2s of silence
-    vad_events:      true,
+// ─── Deepgram nova-3 live connection ─────────────────────────────────────────
+function openDeepgramConnection() {
+  return deepgram.listen.live({
+    model:            'nova-3',      // Fixed: was nova-2
+    language:         'en-US',
+    encoding:         'mulaw',
+    sample_rate:      8000,
+    channels:         1,
+    smart_format:     true,
+    interim_results:  true,
+    utterance_end_ms: 1200,
+    vad_events:       true,
   });
+}
 
-  // Final transcript ready → call AI
-  dgConnection.on(LiveTranscriptionEvents.Transcript, async (data) => {
-    const alt = data.channel?.alternatives?.[0];
-    if (!alt?.transcript || alt.transcript.trim() === '') return;
-
-    const isFinal = data.is_final && data.speech_final;
-    if (!isFinal) return;
-
-    session.transcript = alt.transcript.trim();
-    console.log(`[stream:${session.sessionId}] Final transcript: "${session.transcript}"`);
-
-    // Only respond once per call (can be extended to multi-turn later)
-    if (session.responded) return;
-    session.responded = true;
-
-    await handleAIResponse(session);
-  });
-
-  dgConnection.on(LiveTranscriptionEvents.Error, (err) => {
-    console.error(`[stream:${session.sessionId}] Deepgram error:`, err);
-  });
-
-  dgConnection.on(LiveTranscriptionEvents.Close, () => {
-    console.log(`[stream:${session.sessionId}] Deepgram connection closed`);
-  });
-
-  // ── Twilio WebSocket message handler ──────────────────────────────────────
-  ws.on('message', (raw) => {
-    let msg: Record<string, unknown>;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch {
+// ─── ElevenLabs: text → ulaw 8kHz audio bytes ────────────────────────────────
+//
+// We request ulaw_8000 output from ElevenLabs.  This is exactly the encoding
+// Twilio Media Streams uses (mulaw, 8kHz, mono, 8-bit), so we can pipe the
+// bytes directly into Twilio media events with no conversion step.
+//
+function elevenLabsTTS(text: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    if (!EL_API_KEY || !EL_VOICE_ID) {
+      reject(new Error('ElevenLabs not configured (ELEVENLABS_API_KEY / ELEVENLABS_VOICE_ID)'));
       return;
     }
 
-    const event = msg.event as string;
+    const body = JSON.stringify({
+      text,
+      model_id: 'eleven_multilingual_v2',
+      voice_settings: { stability: 0.5, similarity_boost: 0.75 },
+    });
 
-    if (event === 'connected') {
-      console.log(`[stream:${session.sessionId}] Twilio connected`);
-    }
+    const options = {
+      hostname: 'api.elevenlabs.io',
+      path:     `/v1/text-to-speech/${EL_VOICE_ID}?output_format=ulaw_8000`,
+      method:   'POST',
+      headers:  {
+        'xi-api-key':   EL_API_KEY,
+        'Content-Type': 'application/json',
+        'Accept':       'audio/basic',   // mime type for ulaw
+      },
+    };
 
-    if (event === 'start') {
-      const start = msg.start as Record<string, string>;
-      session.streamSid = start.streamSid;
-      session.callSid   = start.callSid;
-      console.log(`[stream:${session.sessionId}] Stream started — callSid: ${session.callSid}`);
-    }
+    const req = https.request(options, (res) => {
+      const chunks: Buffer[] = [];
+      res.on('data', (chunk: Buffer) => chunks.push(chunk));
+      res.on('end', () => {
+        if ((res.statusCode ?? 0) >= 400) {
+          reject(new Error(`ElevenLabs ${res.statusCode}: ${Buffer.concat(chunks).toString()}`));
+        } else {
+          resolve(Buffer.concat(chunks));
+        }
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
 
-    if (event === 'media') {
-      const media = msg.media as Record<string, string>;
-      // Decode base64 mulaw audio and send to Deepgram
-      const audio = Buffer.from(media.payload, 'base64');
-      if (dgConnection.getReadyState() === 1 /* OPEN */) {
-        dgConnection.send(audio);
+// ─── Send ulaw audio back to the caller over the open WebSocket ───────────────
+//
+// This is the core of the bidirectional approach.  There is NO call to
+// twilioClient.calls().update() anywhere in this function.  We write directly
+// to the same ws that is receiving the caller's audio.
+//
+function streamAudioToTwilio(ws: WebSocket, session: Session, audioBuffer: Buffer): void {
+  if (!session.streamSid) {
+    console.warn(`[${session.id}] streamSid not set — cannot send audio`);
+    return;
+  }
+  if (ws.readyState !== ws.OPEN) {
+    console.warn(`[${session.id}] WebSocket closed before audio could be sent`);
+    return;
+  }
+
+  session.speaking = true;
+
+  let offset = 0;
+  while (offset < audioBuffer.length) {
+    const chunk = audioBuffer.subarray(offset, offset + ULAW_CHUNK_BYTES);
+    offset += ULAW_CHUNK_BYTES;
+
+    ws.send(JSON.stringify({
+      event:     'media',
+      streamSid: session.streamSid,
+      media:     { payload: chunk.toString('base64') },
+    }));
+  }
+
+  // Send a mark event so we know when Twilio has finished playing
+  ws.send(JSON.stringify({
+    event:     'mark',
+    streamSid: session.streamSid,
+    mark:      { name: `done-${Date.now()}` },
+  }));
+
+  session.speaking = false;
+}
+
+// ─── Full AI pipeline: transcript → LLM → TTS → WebSocket audio ──────────────
+async function handleTranscript(
+  ws:       WebSocket,
+  session:  Session,
+  transcript: string,
+): Promise<void> {
+  console.log(`[${session.id}] Transcript: "${transcript}"`, );
+
+  // Detect emergencies for escalation (simple keyword heuristic — extend as needed)
+  const isEmergency = /\b(emergency|urgent|hurt|injured|fire|flood|dying|bleed)\b/i.test(transcript);
+
+  // Append to conversation history for multi-turn context
+  session.history.push({ role: 'user', content: transcript });
+
+  const SYSTEM = [
+    'You are a helpful AI assistant answering an inbound phone call on behalf of a home-services contractor business (ForgePipeline).',
+    'Keep responses SHORT — two or three sentences maximum. Sound natural and warm.',
+    'If the caller describes a genuine emergency (fire, injury, gas leak) escalate urgency.',
+    'Ask for the caller\'s name and what service they need if they haven\'t said yet.',
+  ].join(' ');
+
+  let llmResp;
+  try {
+    llmResp = await chat({
+      system:   SYSTEM,
+      messages: session.history,
+      escalate: isEmergency,
+    });
+  } catch (err) {
+    console.error(`[${session.id}] LLM error:`, err);
+    return;
+  }
+
+  console.log(`[${session.id}] LLM (${llmResp.model}): "${llmResp.text}"`);
+
+  // Append assistant turn to history
+  session.history.push({ role: 'assistant', content: llmResp.text });
+
+  // Convert AI text to ulaw audio via ElevenLabs
+  let audioBuffer: Buffer;
+  try {
+    audioBuffer = await elevenLabsTTS(llmResp.text);
+    console.log(`[${session.id}] ElevenLabs: ${audioBuffer.length} bytes ulaw`);
+  } catch (err) {
+    console.error(`[${session.id}] ElevenLabs TTS failed:`, err);
+    // No fallback redirect — log and continue; caller will hear silence for this turn
+    return;
+  }
+
+  // ── Send audio back over the open WebSocket — no REST call, no redirect ──
+  streamAudioToTwilio(ws, session, audioBuffer);
+}
+
+// ─── Main WebSocket connection handler ───────────────────────────────────────
+export function handleStreamConnection(ws: WebSocket): void {
+  const session: Session = {
+    id:        uuidv4(),
+    streamSid: null,
+    callSid:   null,
+    history:   [],
+    speaking:  false,
+  };
+
+  console.log(`[${session.id}] Stream connection opened`);
+
+  // Open Deepgram live STT connection for this call
+  const dg = openDeepgramConnection();
+
+  // Final transcript from Deepgram
+  dg.on(LiveTranscriptionEvents.Transcript, (data) => {
+    const alt = data.channel?.alternatives?.[0];
+    if (!alt?.transcript?.trim()) return;
+    if (!data.is_final || !data.speech_final) return;  // wait for full utterance
+
+    handleTranscript(ws, session, alt.transcript.trim()).catch((err) =>
+      console.error(`[${session.id}] handleTranscript error:`, err),
+    );
+  });
+
+  dg.on(LiveTranscriptionEvents.Error, (err) =>
+    console.error(`[${session.id}] Deepgram error:`, err),
+  );
+  dg.on(LiveTranscriptionEvents.Close, () =>
+    console.log(`[${session.id}] Deepgram closed`),
+  );
+
+  // Handle mark events (Twilio confirms audio playback finished)
+  ws.on('message', (raw) => {
+    let msg: Record<string, unknown>;
+    try { msg = JSON.parse(raw.toString()); }
+    catch { return; }
+
+    switch (msg.event) {
+      case 'connected':
+        console.log(`[${session.id}] Twilio connected`);
+        break;
+
+      case 'start': {
+        const s = msg.start as Record<string, string>;
+        session.streamSid = s.streamSid;
+        session.callSid   = s.callSid;
+        console.log(`[${session.id}] Stream started — callSid: ${session.callSid}`);
+        break;
       }
-    }
 
-    if (event === 'stop') {
-      console.log(`[stream:${session.sessionId}] Stream stopped by Twilio`);
-      dgConnection.finish();
+      case 'media': {
+        // Forward caller audio to Deepgram — only when we are NOT speaking
+        // (avoid feeding our own output back into STT)
+        if (session.speaking) return;
+        const m = msg.media as Record<string, string>;
+        const audio = Buffer.from(m.payload, 'base64');
+        if (dg.getReadyState() === 1 /* OPEN */) {
+          dg.send(audio);
+        }
+        break;
+      }
+
+      case 'mark':
+        // Twilio confirms our audio was played
+        console.log(`[${session.id}] Mark received: ${(msg.mark as any)?.name}`);
+        break;
+
+      case 'stop':
+        console.log(`[${session.id}] Stream stopped`);
+        dg.finish();
+        break;
     }
   });
 
   ws.on('close', () => {
-    console.log(`[stream:${session.sessionId}] WebSocket closed`);
-    dgConnection.finish();
+    console.log(`[${session.id}] WebSocket closed`);
+    dg.finish();
   });
 
   ws.on('error', (err) => {
-    console.error(`[stream:${session.sessionId}] WebSocket error:`, err);
-    dgConnection.finish();
+    console.error(`[${session.id}] WebSocket error:`, err);
+    dg.finish();
   });
-}
-
-// ─── AI response pipeline ─────────────────────────────────────────────────────
-async function handleAIResponse(session: StreamSession): Promise<void> {
-  if (!session.callSid || !session.transcript) return;
-
-  console.log(`[stream:${session.sessionId}] Calling Anthropic for: "${session.transcript}"`);
-
-  try {
-    // 1. Generate AI text response
-    const aiMsg = await anthropic.messages.create({
-      model:      'claude-opus-4-5',
-      max_tokens: 200,
-      system: [
-        'You are a helpful AI assistant for ForgePipeline, an AI-powered lead response service for contractors.',
-        'You are answering an inbound phone call. Keep responses SHORT — 2–3 sentences max.',
-        'Sound natural, warm, and professional. Do not use lists or formatting.',
-        'If someone is calling about a job, ask for their name and what they need done.',
-      ].join(' '),
-      messages: [
-        { role: 'user', content: session.transcript },
-      ],
-    });
-
-    const textContent = aiMsg.content.find((c) => c.type === 'text');
-    const responseText = textContent?.text ?? "Thanks for calling. How can I help you today?";
-    console.log(`[stream:${session.sessionId}] AI response: "${responseText}"`);
-
-    // 2. Convert to speech — here we use ElevenLabs if configured, else Twilio Polly fallback
-    const audioUrl = await textToSpeechUrl(responseText, session.sessionId);
-
-    // 3. Redirect the live call to play the audio
-    if (audioUrl) {
-      await twilioClient.calls(session.callSid!).update({
-        twiml: `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Play>${audioUrl}</Play>
-  <Pause length="1"/>
-  <Say voice="Polly.Joanna">Is there anything else I can help you with?</Say>
-</Response>`,
-      });
-      console.log(`[stream:${session.sessionId}] Redirected call to AI audio`);
-    } else {
-      // Fallback: use Twilio's built-in TTS if no audio URL
-      await twilioClient.calls(session.callSid!).update({
-        twiml: `<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-  <Say voice="Polly.Joanna">${escapeXml(responseText)}</Say>
-  <Pause length="1"/>
-</Response>`,
-      });
-      console.log(`[stream:${session.sessionId}] Redirected call to Polly TTS (ElevenLabs fallback)`);
-    }
-
-  } catch (err) {
-    console.error(`[stream:${session.sessionId}] AI pipeline error:`, err);
-  }
-}
-
-// ─── TTS via ElevenLabs ───────────────────────────────────────────────────────
-async function textToSpeechUrl(text: string, sessionId: string): Promise<string | null> {
-  const apiKey  = process.env.ELEVENLABS_API_KEY;
-  const voiceId = process.env.ELEVENLABS_VOICE_ID;
-  const baseUrl = process.env.SERVICE_BASE_URL; // We need a place to serve the audio
-
-  if (!apiKey || !voiceId) {
-    console.warn(`[stream:${sessionId}] ElevenLabs not configured — using Polly fallback`);
-    return null;
-  }
-
-  try {
-    // ElevenLabs streaming → we return null here and let the caller use Polly
-    // TODO: implement ElevenLabs audio generation + storage (S3/Cloudinary) and return URL
-    // For now, return null to trigger Polly fallback until storage is wired
-    console.log(`[stream:${sessionId}] ElevenLabs TTS stub — returning null (use Polly)`);
-    return null;
-  } catch (err) {
-    console.error(`[stream:${sessionId}] ElevenLabs error:`, err);
-    return null;
-  }
-}
-
-function escapeXml(str: string): string {
-  return str
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
 }

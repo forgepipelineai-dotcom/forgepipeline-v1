@@ -27,12 +27,9 @@ export function handleIncomingCall(req: Request, res: Response): void {
   twiml.pause({ length: 1 });
 
   const start = twiml.start();
-  start.stream({
-    url: streamUrl,
-    // Track is 'inbound_track' — we receive caller audio; bidirectional is
-    // possible but requires the caller's audio only for STT → AI → TTS flow
-    track: 'inbound_track',
-  });
+  // No track restriction — default captures both directions.
+  // We read inbound audio for STT and write audio back over the same socket.
+  start.stream({ url: streamUrl });
 
   // Keep the call alive while the stream is open (up to 30s default)
   // Increase this if your AI round-trip takes longer
