@@ -1,0 +1,61 @@
+services:
+  # ─── Twilio Media Streams — real-time voice AI ──────────────────────────────
+  - type: web
+    name: forgepipeline-media-stream
+    runtime: docker
+    # Build from the media-stream subdirectory; Dockerfile is inside it
+    rootDir: services/media-stream
+    dockerfilePath: ./Dockerfile
+
+    # Starter plan keeps one instance alive (no spin-down) — required for
+    # persistent WebSocket connections; Twilio streams will fail if the
+    # service is sleeping when a call arrives.
+    plan: starter
+
+    region: oregon   # us-west-2 — adjust to match your Twilio edge location
+
+    # Render will route external HTTPS traffic to this port
+    # (service listens on PORT env var which Render injects automatically)
+    healthCheckPath: /health
+
+    # Upgrade HTTP connections to WebSocket on the same port (/stream path)
+    # Render's proxy handles the protocol upgrade transparently.
+
+    # ── Environment variables ─────────────────────────────────────────────────
+    # Do NOT put real values here. Enter them in the Render dashboard under
+    # Environment → "Add environment variable" for this service.
+    # Using `generateValue: true` on SECRET_KEY produces a random value automatically.
+    envVars:
+      - key: NODE_ENV
+        value: production
+
+      - key: PORT
+        value: "8080"
+
+      # The public HTTPS URL of THIS service once deployed.
+      # Example: https://forgepipeline-media-stream.onrender.com
+      # Used to build the wss:// Media Stream URL in the TwiML response.
+      - key: SERVICE_BASE_URL
+        sync: false   # enter manually in dashboard
+
+      # Twilio credentials — enter in dashboard
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+
+      # Deepgram — enter in dashboard
+      - key: DEEPGRAM_API_KEY
+        sync: false
+
+      # Anthropic — enter in dashboard
+      - key: ANTHROPIC_API_KEY
+        sync: false
+
+      # ElevenLabs — optional; if absent, service falls back to Twilio Polly TTS
+      - key: ELEVENLABS_API_KEY
+        sync: false
+
+      - key: ELEVENLABS_VOICE_ID
+        sync: false
